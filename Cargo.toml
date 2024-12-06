@@ -1,0 +1,15 @@
+[package]
+name = "genetic-progrs"
+edition = "2021"
+version = "0.1.0"
+
+[features]
+
+[dependencies]
+ego-tree = "0.9.0"
+more_collections = { version = "0.14.3", features = ["all"] }
+derive_more = { version = "1.0.0", features = ["from", "into"] }
+rand = "0.8.5"
+rand_xoshiro = "0.6.0"
+itertools = "0.13.0"
+strum = { version = "0.26.3", features = ["derive"] }
