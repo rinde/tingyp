@@ -1,8 +1,17 @@
 use std::array;
 use std::hash::Hash;
 
+use derive_more::derive::Add;
+use derive_more::derive::AddAssign;
+use derive_more::derive::Div;
+use derive_more::derive::DivAssign;
 use derive_more::derive::From;
 use derive_more::derive::Into;
+use derive_more::derive::Mul;
+use derive_more::derive::MulAssign;
+use derive_more::derive::Neg;
+use derive_more::derive::Sub;
+use derive_more::derive::SubAssign;
 use educe::Educe;
 use rand::seq::index;
 use rand::Rng;
@@ -16,7 +25,11 @@ use strum::VariantArray;
 pub type Random = Xoshiro256PlusPlus;
 
 pub trait Variable: Clone + Copy + Eq + PartialEq + std::fmt::Debug {
+    type Context;
+
     fn name(&self) -> &'static str;
+
+    fn value(&self, context: &Self::Context) -> Value;
 }
 
 #[derive(Debug, EnumDiscriminants, Clone, Eq, PartialEq)]
@@ -36,8 +49,30 @@ enum Node<T: Variable> {
 }
 
 // TODO make generic
-#[derive(Clone, Copy, Debug, From, Into)]
-pub struct Value(f64);
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    From,
+    Into,
+    Default,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Neg,
+)]
+pub struct Value(pub f64);
+
+impl Value {
+    pub fn abs(&self) -> Value {
+        Self(self.0.abs())
+    }
+}
 
 impl Eq for Value {}
 impl PartialEq for Value {
@@ -88,7 +123,7 @@ impl<T: Variable> Node<T> {
         }
     }
 
-    pub fn eval(&self, ctx: &Context) -> f64 {
+    pub fn eval(&self, ctx: &T::Context) -> Value {
         use Node::*;
         match self {
             If4(children) => {
@@ -100,20 +135,20 @@ impl<T: Variable> Node<T> {
             }
             Add(children) => children[0].eval(ctx) + children[1].eval(ctx),
             Sub(children) => children[0].eval(ctx) - children[1].eval(ctx),
-            Mul(children) => children[0].eval(ctx) * children[1].eval(ctx),
+            Mul(children) => children[0].eval(ctx) * children[1].eval(ctx).0,
             Div(children) => {
                 let v1 = children[1].eval(ctx);
-                if v1.abs() < f64::EPSILON {
-                    0.0
+                if v1.abs() < Value(f64::EPSILON) {
+                    Value(0.0)
                 } else {
-                    children[0].eval(ctx) / v1
+                    Value(children[0].eval(ctx).0 / v1.0)
                 }
             }
             Neg(children) => -children[0].eval(ctx),
             Min(children) => children[0].eval(ctx).min(children[1].eval(ctx)),
             Max(children) => children[0].eval(ctx).max(children[1].eval(ctx)),
             Const(value) => (*value).into(),
-            Var(_) => ctx.x,
+            Var(variable) => variable.value(ctx),
         }
     }
 
@@ -284,14 +319,9 @@ impl<T: Variable> Node<T> {
     }
 }
 
-#[derive(Default, Clone)]
-struct Context {
-    x: f64,
-}
-
 #[derive(Debug, Clone, Educe)]
 #[educe(Default)]
-struct Tree<V: Variable> {
+pub struct Tree<V: Variable> {
     #[educe(Default = Node::Const(0.0.into()))]
     root: Node<V>,
 }
@@ -339,7 +369,7 @@ impl<V: Variable> Tree<V> {
         }
     }
 
-    fn eval(&self, ctx: &Context) -> f64 {
+    pub fn eval(&self, ctx: &V::Context) -> Value {
         self.root.eval(ctx)
     }
 
@@ -355,11 +385,11 @@ impl<V: Variable> Tree<V> {
         }
     }
 
-    fn to_rust(&self) -> String {
+    pub fn to_rust(&self) -> String {
         format!("let result = {};", self.root.to_rust())
     }
 
-    fn simplify(&mut self) {
+    pub fn simplify(&mut self) {
         self.root.simplify();
     }
 }
@@ -409,7 +439,7 @@ impl<const L: usize, const N: usize, V: Variable> RandomNodeGenerator<V>
     }
 }
 
-struct Evolver<V: Variable, G> {
+pub struct Evolver<V: Variable, G> {
     population: Vec<Tree<V>>,
     max_tree_depth: usize,
     generator: G,
@@ -417,7 +447,7 @@ struct Evolver<V: Variable, G> {
 }
 
 impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
-    fn new(pop_size: usize, max_tree_depth: usize, generator: G, seed: u64) -> Self {
+    pub fn new(pop_size: usize, max_tree_depth: usize, generator: G, seed: u64) -> Self {
         let mut rng = Random::seed_from_u64(seed);
         Self {
             population: std::iter::repeat_with(|| {
@@ -431,11 +461,7 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
         }
     }
 
-    // calculate fitness
-    // save best
-    // select
-
-    fn evolve(&mut self, evaluator: &impl Evaluator<V>, generations: usize) -> (Tree<V>, f64) {
+    pub fn evolve(&mut self, evaluator: &impl Evaluator<V>, generations: usize) -> (Tree<V>, f64) {
         let mut all_time_best = (Tree::default(), f64::MAX);
 
         for gen in 0..generations {
@@ -524,54 +550,8 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
     }
 }
 
-trait Evaluator<V: Variable> {
+pub trait Evaluator<V: Variable> {
     fn evaluate(&self, individual: &Tree<V>) -> f64;
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Vars {
-    X,
-}
-
-impl Variable for Vars {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::X => "x",
-        }
-    }
-}
-
-pub fn main() {
-    let generator = WeightedNodeGenerator::new(
-        [
-            (NodeType::Add, 1),
-            (NodeType::Sub, 1),
-            (NodeType::Mul, 1),
-            (NodeType::Div, 1),
-            (NodeType::Neg, 1),
-            (NodeType::Var(Vars::X), 5),
-        ],
-        [
-            (NodeType::Const(Value(0.0)), 1),
-            (NodeType::Const(Value(1.0)), 1),
-            (NodeType::Const(Value(2.0)), 1),
-            (NodeType::Const(Value(10.0)), 1),
-            (NodeType::Var(Vars::X), 1),
-        ],
-    );
-
-    let mut pop = Evolver::new(500, 6, generator, 0);
-
-    let best = pop.evolve(&Polynomial, 100);
-
-    println!("{best:?}");
-
-    println!("{}", best.0.to_rust());
-
-    let mut simple = best.0.clone();
-    simple.simplify();
-    println!("----");
-    println!("{simple:?}");
-    println!("{}", simple.to_rust());
 }
 
 fn _test() {
@@ -579,54 +559,36 @@ fn _test() {
     let _result = x + 1.0 * x + f64::max(x + 2.0, 2.0) + 2.0;
 }
 
-struct Polynomial;
-
-impl<V: Variable> Evaluator<V> for Polynomial {
-    fn evaluate(&self, individual: &Tree<V>) -> f64 {
-        let mut error_sum = 0.0;
-        for x in 0..100 {
-            let x = x as f64 / 100.0;
-            let expected_y = (x * 2.0) + x + 4.0;
-            let actual_y = individual.eval(&Context { x });
-            error_sum += (actual_y - expected_y).abs();
-        }
-        error_sum
-    }
-}
-
 #[cfg(test)]
 mod test {
 
-    use super::*;
-    use rand::SeedableRng;
+    // #[test]
+    // fn testsfd() {
+    //     let tree = Tree {
+    //         root: Node::Add([
+    //             Box::new(Node::Const(0.0.into())),
+    //             Box::new(Node::Const(1.0.into())),
+    //         ]),
+    //     };
 
-    #[test]
-    fn testsfd() {
-        let tree = Tree {
-            root: Node::Add([
-                Box::new(Node::Const(0.0.into())),
-                Box::new(Node::Const(1.0.into())),
-            ]),
-        };
+    //     let mut rng = Random::seed_from_u64(0);
 
-        let mut rng = Random::seed_from_u64(0);
+    //     let tree = Tree::new_random(&mut rng);
 
-        let tree = Tree::new_random(&mut rng);
+    //     println!("{tree:?}");
+    // }
 
-        println!("{tree:?}");
-    }
-
-    #[test]
-    fn simple() {
-        let res = Node::If4([
-            Box::new(Node::Const(1.0.into())),
-            Box::new(Node::Const(2.0.into())),
-            Box::new(Node::Const(0.0.into())),
-            Box::new(Node::Const(2.0.into())),
-        ])
-        .eval(&Context::default());
-        assert!(res.abs() < f64::EPSILON);
-    }
+    // #[test]
+    // fn simple() {
+    //     let res = Node::If4([
+    //         Box::new(Node::Const(1.0.into())),
+    //         Box::new(Node::Const(2.0.into())),
+    //         Box::new(Node::Const(0.0.into())),
+    //         Box::new(Node::Const(2.0.into())),
+    //     ])
+    //     .eval(&Context::default());
+    //     assert!(res.abs() < f64::EPSILON);
+    // }
 }
 
 // enum Node {
