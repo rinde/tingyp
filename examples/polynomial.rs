@@ -2,30 +2,30 @@ use genetic_progrs::Evaluator;
 use genetic_progrs::Evolver;
 use genetic_progrs::NodeType;
 use genetic_progrs::Tree;
-use genetic_progrs::Value;
 use genetic_progrs::Variable;
 use genetic_progrs::WeightedNodeGenerator;
 
 pub fn main() {
+    use NodeType::*;
     let generator = WeightedNodeGenerator::new(
         [
-            (NodeType::Add, 1),
-            (NodeType::Sub, 1),
-            (NodeType::Mul, 1),
-            (NodeType::Div, 1),
-            (NodeType::Neg, 1),
-            (NodeType::Const(Value(0.0)), 1),
-            (NodeType::Const(Value(1.0)), 1),
-            (NodeType::Const(Value(2.0)), 1),
-            (NodeType::Const(Value(10.0)), 1),
-            (NodeType::Var(Vars::X), 5),
+            (Add, 1),
+            (Sub, 1),
+            (Mul, 1),
+            (Div, 1),
+            (Neg, 1),
+            (Const(0.0), 1),
+            (Const(1.0), 1),
+            (Const(2.0), 1),
+            (Const(10.0), 1),
+            (Var(Vars::X), 5),
         ],
         [
-            (NodeType::Const(Value(0.0)), 1),
-            (NodeType::Const(Value(1.0)), 1),
-            (NodeType::Const(Value(2.0)), 1),
-            (NodeType::Const(Value(10.0)), 1),
-            (NodeType::Var(Vars::X), 1),
+            (Const(0.0), 1),
+            (Const(1.0), 1),
+            (Const(2.0), 1),
+            (Const(10.0), 1),
+            (Var(Vars::X), 1),
         ],
     );
 
@@ -51,11 +51,12 @@ enum Vars {
 
 #[derive(Default, Clone)]
 struct Context {
-    x: Value,
+    x: f64,
 }
 
 impl Variable for Vars {
     type Context = Context;
+    type Value = f64;
 
     fn name(&self) -> &'static str {
         match self {
@@ -63,7 +64,7 @@ impl Variable for Vars {
         }
     }
 
-    fn value(&self, context: &Self::Context) -> Value {
+    fn value(&self, context: &Self::Context) -> f64 {
         match self {
             Self::X => context.x,
         }
@@ -72,15 +73,15 @@ impl Variable for Vars {
 
 struct Polynomial;
 
-impl<V: Variable<Context = Context>> Evaluator<V> for Polynomial {
-    fn evaluate(&self, individual: &Tree<V>) -> f64 {
+impl Evaluator<Vars> for Polynomial {
+    fn evaluate(&self, individual: &Tree<Vars>) -> f64 {
         let mut error_sum = 0.0;
         for x in 0..100 {
             let x = x as f64 / 100.0;
-            let expected_y = Value((x * 2.0) + x + 4.0);
-            let context = Context { x: Value(x) };
+            let expected_y = (x * 3.0) + 4.0;
+            let context = Context { x: x };
             let actual_y = individual.eval(&context);
-            error_sum += (actual_y - expected_y).abs().0;
+            error_sum += (actual_y - expected_y).abs();
         }
         error_sum
     }

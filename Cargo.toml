@@ -13,4 +13,5 @@ derive_more = { version = "1.0.0", features = ["from", "into", "mul", "mul_assig
 rand = "0.8.5"
 rand_xoshiro = "0.6.0"
 itertools = "0.13.0"
+num = "0.4.3"
 strum = { version = "0.26.3", features = ["derive"] }

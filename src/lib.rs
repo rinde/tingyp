@@ -1,18 +1,15 @@
 use std::array;
+use std::fmt::Display;
 use std::hash::Hash;
+use std::ops::Neg;
 
-use derive_more::derive::Add;
-use derive_more::derive::AddAssign;
-use derive_more::derive::Div;
-use derive_more::derive::DivAssign;
-use derive_more::derive::From;
-use derive_more::derive::Into;
-use derive_more::derive::Mul;
-use derive_more::derive::MulAssign;
-use derive_more::derive::Neg;
-use derive_more::derive::Sub;
-use derive_more::derive::SubAssign;
 use educe::Educe;
+use num::traits::ConstOne;
+use num::traits::ConstZero;
+use num::Float;
+use num::Num;
+use num::One;
+use num::Zero;
 use rand::seq::index;
 use rand::Rng;
 use rand::SeedableRng;
@@ -25,74 +22,95 @@ use strum::VariantArray;
 pub type Random = Xoshiro256PlusPlus;
 
 pub trait Variable: Clone + Copy + Eq + PartialEq + std::fmt::Debug {
+    type Value: Value;
+
     type Context;
 
     fn name(&self) -> &'static str;
 
-    fn value(&self, context: &Self::Context) -> Value;
+    fn value(&self, context: &Self::Context) -> Self::Value;
+}
+
+pub trait Value:
+    Num
+    + std::ops::Neg<Output = Self>
+    + PartialOrd
+    + Clone
+    + Copy
+    + ConstZero
+    + ConstOne
+    + Display
+    + std::fmt::Debug
+{
+    fn min(self, other: Self) -> Self;
+    fn max(self, other: Self) -> Self;
+    fn double(self) -> Self;
+}
+
+impl_value_for_floats!(f32, f64);
+impl_value_for_signed_ints!(i8, i16, i32, i64, i128, isize);
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! impl_value_for_floats {
+    ($($t:ty),+ $(,)?) => {
+        $(
+            impl Value for $t {
+                fn min(self, other:Self) -> Self {
+                    self.min(other)
+                }
+
+                fn max(self, other: Self) -> Self {
+                    Float::max(self, other)
+                }
+
+                fn double(self) -> Self {
+                    self * 2 as $t
+                }
+            }
+        )+
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! impl_value_for_signed_ints {
+    ($($t:ty),+ $(,)?) => {
+        $(
+            impl Value for $t {
+                fn min(self, other:Self) -> Self {
+                    Ord::min(self, other)
+                }
+
+                fn max(self, other: Self) -> Self {
+                    Ord::max(self, other)
+                }
+
+                fn double(self) -> Self {
+                    self * 2 as $t
+                }
+            }
+        )+
+    };
 }
 
 #[derive(Debug, EnumDiscriminants, Clone, Eq, PartialEq)]
 #[strum_discriminants(derive(EnumString, EnumMessage, VariantArray, Hash))]
-enum Node<T: Variable> {
-    If4([Box<Node<T>>; 4]),
-    Add([Box<Node<T>>; 2]),
-    Sub([Box<Node<T>>; 2]),
-    Mul([Box<Node<T>>; 2]),
-    Div([Box<Node<T>>; 2]),
+enum Node<V: Variable> {
+    If4([Box<Node<V>>; 4]),
+    Add([Box<Node<V>>; 2]),
+    Sub([Box<Node<V>>; 2]),
+    Mul([Box<Node<V>>; 2]),
+    Div([Box<Node<V>>; 2]),
 
-    Neg([Box<Node<T>>; 1]),
-    Min([Box<Node<T>>; 2]),
-    Max([Box<Node<T>>; 2]),
-    Const(Value),
-    Var(T),
+    Neg([Box<Node<V>>; 1]),
+    Min([Box<Node<V>>; 2]),
+    Max([Box<Node<V>>; 2]),
+    Const(V::Value),
+    Var(V),
 }
 
-// TODO make generic
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    From,
-    Into,
-    Default,
-    Add,
-    AddAssign,
-    Sub,
-    SubAssign,
-    Mul,
-    MulAssign,
-    Div,
-    DivAssign,
-    Neg,
-)]
-pub struct Value(pub f64);
-
-impl Value {
-    pub fn abs(&self) -> Value {
-        Self(self.0.abs())
-    }
-}
-
-impl Eq for Value {}
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl Ord for Value {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        Self::partial_cmp(&self, other).unwrap()
-    }
-}
-impl PartialOrd for Value {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.0.partial_cmp(&other.0)
-    }
-}
-
-impl<T: Variable> Node<T> {
+impl<V: Variable> Node<V> {
     pub fn has_children(&self) -> bool {
         use Node::*;
         match self {
@@ -101,7 +119,7 @@ impl<T: Variable> Node<T> {
         }
     }
 
-    pub fn children(&self) -> impl Iterator<Item = &Box<Node<T>>> {
+    pub fn children(&self) -> impl Iterator<Item = &Box<Node<V>>> {
         use Node::*;
         match self {
             If4(children) => children.iter(),
@@ -112,7 +130,7 @@ impl<T: Variable> Node<T> {
         }
     }
 
-    pub fn children_mut(&mut self) -> Option<&mut [Box<Node<T>>]> {
+    pub fn children_mut(&mut self) -> Option<&mut [Box<Node<V>>]> {
         use Node::*;
         match self {
             If4(children) => Some(children),
@@ -123,7 +141,7 @@ impl<T: Variable> Node<T> {
         }
     }
 
-    pub fn eval(&self, ctx: &T::Context) -> Value {
+    pub fn eval(&self, ctx: &V::Context) -> V::Value {
         use Node::*;
         match self {
             If4(children) => {
@@ -135,13 +153,13 @@ impl<T: Variable> Node<T> {
             }
             Add(children) => children[0].eval(ctx) + children[1].eval(ctx),
             Sub(children) => children[0].eval(ctx) - children[1].eval(ctx),
-            Mul(children) => children[0].eval(ctx) * children[1].eval(ctx).0,
+            Mul(children) => children[0].eval(ctx) * children[1].eval(ctx),
             Div(children) => {
                 let v1 = children[1].eval(ctx);
-                if v1.abs() < Value(f64::EPSILON) {
-                    Value(0.0)
+                if v1.is_zero() {
+                    V::Value::ZERO
                 } else {
-                    Value(children[0].eval(ctx).0 / v1.0)
+                    children[0].eval(ctx) / v1
                 }
             }
             Neg(children) => -children[0].eval(ctx),
@@ -152,12 +170,12 @@ impl<T: Variable> Node<T> {
         }
     }
 
-    fn grow<V: Variable>(
-        generator: &impl RandomNodeGenerator<V>,
+    fn grow<T: Variable>(
+        generator: &impl RandomNodeGenerator<T>,
         rng: &mut impl Rng,
         depth: usize,
         limit: usize,
-    ) -> Node<V> {
+    ) -> Node<T> {
         use NodeType::*;
         if depth >= limit {
             return match generator.generate_no_children(rng) {
@@ -214,7 +232,7 @@ impl<T: Variable> Node<T> {
             Node::Neg([c0]) => format!("-{}", c0.to_rust()),
             Node::Min([c0, c1]) => format!("f64::min({}, {})", c0.to_rust(), c1.to_rust()),
             Node::Max([c0, c1]) => format!("f64::max({}, {})", c0.to_rust(), c1.to_rust()),
-            Node::Const(value) => format!("{:.2}", value.0),
+            Node::Const(value) => format!("{:.2}", value),
             Node::Var(v) => v.name().to_string(),
         }
     }
@@ -240,14 +258,15 @@ impl<T: Variable> Node<T> {
                 }
             }
             Node::Add([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const((c0.0 + c1.0).into()),
-                (Const(Value(0.0)), _) => (**c1).clone(),
-                (_, Const(Value(0.0))) => (**c0).clone(),
-                (c0, c1) if c0 == c1 => {
-                    Node::Mul([Box::new(Node::Const(Value(2.0))), Box::new(c0.clone())])
-                }
+                (Const(c0), Const(c1)) => Node::Const((*c0 + *c1).into()),
+                (Const(v), _) if v.is_zero() => (**c1).clone(),
+                (_, Const(v)) if v.is_zero() => (**c0).clone(),
+                (c0, c1) if c0 == c1 => Node::Mul([
+                    Box::new(Node::Const(V::Value::ONE.double())),
+                    Box::new(c0.clone()),
+                ]),
                 (Mul([c00, c01]), c1) if *c1 == **c01 => {
-                    let mut inner_add = Node::Add([c00.clone(), Box::new(Const(Value(1.0)))]);
+                    let mut inner_add = Node::Add([c00.clone(), Box::new(Const(V::Value::ONE))]);
                     inner_add.simplify();
                     Node::Mul([Box::new(inner_add), c01.clone()])
                 }
@@ -278,39 +297,39 @@ impl<T: Variable> Node<T> {
                 _ => self.clone(),
             },
             Node::Sub([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const((c0.0 - c1.0).into()),
-                (Const(Value(0.0)), _) => (**c1).clone(),
-                (_, Const(Value(0.0))) => (**c0).clone(),
+                (Const(c0), Const(c1)) => Node::Const((*c0 - *c1).into()),
+                (Const(v), _) if v.is_zero() => (**c1).clone(),
+                (_, Const(v)) if v.is_zero() => (**c0).clone(),
                 (c0, Neg([c1])) => Add([Box::new(c0.clone()), c1.clone()]),
-                (left, right) if left == right => Node::Const(Value(0.0)),
+                (left, right) if left == right => Node::Const(V::Value::ZERO),
                 _ => self.clone(),
             },
             Node::Mul([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const((c0.0 * c1.0).into()),
-                (Const(Value(0.0)), _) | (_, Const(Value(0.0))) => Node::Const(Value(0.0)),
-                (Const(Value(1.0)), _) => (**c1).clone(),
-                (_, Const(Value(1.0))) => (**c0).clone(),
+                (Const(c0), Const(c1)) => Node::Const((*c0 * *c1).into()),
+                (Const(v), _) | (_, Const(v)) if v.is_zero() => Const(V::Value::ZERO),
+                (Const(v), _) if v.is_one() => (**c1).clone(),
+                (_, Const(v)) if v.is_one() => (**c0).clone(),
                 (c0, c1 @ Const(_)) => Node::Mul([Box::new(c1.clone()), Box::new(c0.clone())]),
                 _ => self.clone(),
             },
             Node::Div([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(Value(0.0)), _) | (_, Const(Value(0.0))) => Node::Const(Value(0.0)), // zero division
-                (Const(c0), Const(c1)) => Node::Const((c0.0 / c1.0).into()),
+                (Const(v), _) | (_, Const(v)) if v.is_zero() => Const(V::Value::ZERO), // zero division
+                (Const(c0), Const(c1)) => Node::Const((*c0 / *c1).into()),
                 (left, right) if left == right => left.clone(),
                 _ => self.clone(),
             },
             Node::Neg([c0]) => match c0.as_ref() {
-                Const(v) => Const(Value(-v.0)),
+                Const(v) => Const(v.neg()),
                 Neg([inner]) => (**inner).clone(), // double negation
                 _ => self.clone(),
             },
             Node::Min([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const(c0.0.min(c1.0).into()),
+                (Const(c0), Const(c1)) => Node::Const(c0.min(*c1).into()),
                 (left, right) if left == right => left.clone(),
                 _ => self.clone(),
             },
             Node::Max([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const(c0.0.max(c1.0).into()),
+                (Const(c0), Const(c1)) => Node::Const(c0.max(*c1).into()),
                 (left, right) if left == right => left.clone(),
                 _ => self.clone(),
             },
@@ -322,7 +341,7 @@ impl<T: Variable> Node<T> {
 #[derive(Debug, Clone, Educe)]
 #[educe(Default)]
 pub struct Tree<V: Variable> {
-    #[educe(Default = Node::Const(0.0.into()))]
+    #[educe(Default = Node::Const(V::Value::ZERO))]
     root: Node<V>,
 }
 
@@ -369,7 +388,7 @@ impl<V: Variable> Tree<V> {
         }
     }
 
-    pub fn eval(&self, ctx: &V::Context) -> Value {
+    pub fn eval(&self, ctx: &V::Context) -> V::Value {
         self.root.eval(ctx)
     }
 
@@ -404,7 +423,7 @@ pub enum NodeType<V: Variable> {
     Neg,
     Min,
     Max,
-    Const(Value),
+    Const(V::Value),
     Var(V),
 }
 
@@ -415,15 +434,15 @@ pub trait RandomNodeGenerator<V: Variable> {
 
 pub struct WeightedNodeGenerator<const L: usize, const N: usize, V: Variable> {
     all: [(NodeType<V>, u8); L],
-    no_kids: [(NodeType<V>, u8); N],
+    leafs: [(NodeType<V>, u8); N],
 }
 
 impl<const L: usize, const N: usize, V: Variable> WeightedNodeGenerator<L, N, V> {
-    pub fn new(all: [(NodeType<V>, u8); L], no_kids: [(NodeType<V>, u8); N]) -> Self {
-        for (n, _) in no_kids {
+    pub fn new(all: [(NodeType<V>, u8); L], leafs: [(NodeType<V>, u8); N]) -> Self {
+        for (n, _) in leafs {
             assert!(matches!(n, NodeType::Const(_) | NodeType::Var(_)));
         }
-        Self { all, no_kids }
+        Self { all, leafs }
     }
 }
 
@@ -435,7 +454,7 @@ impl<const L: usize, const N: usize, V: Variable> RandomNodeGenerator<V>
     }
 
     fn generate_no_children(&self, rng: &mut impl Rng) -> NodeType<V> {
-        self.no_kids[rng.gen_range(0..N)].0
+        self.leafs[rng.gen_range(0..N)].0
     }
 }
 
