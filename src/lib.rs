@@ -1,6 +1,7 @@
 use std::array;
 use std::fmt::Display;
 use std::hash::Hash;
+use std::iter::Sum;
 use std::ops::Neg;
 
 use educe::Educe;
@@ -9,11 +10,15 @@ use num::traits::ConstZero;
 use num::Float;
 use num::Num;
 use num::One;
+use num::ToPrimitive;
 use num::Zero;
 use rand::seq::index;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
+use std::num::Saturating;
 use strum::EnumDiscriminants;
 use strum::EnumMessage;
 use strum::EnumString;
@@ -21,10 +26,10 @@ use strum::VariantArray;
 
 pub type Random = Xoshiro256PlusPlus;
 
-pub trait Variable: Clone + Copy + Eq + PartialEq + std::fmt::Debug {
-    type Value: Value;
+pub trait Variable: Clone + Copy + Eq + PartialEq + std::fmt::Debug + Send + Sync {
+    type Value: Value + Send + Sync;
 
-    type Context;
+    type Context: Send + Sync;
 
     fn name(&self) -> &'static str;
 
@@ -40,11 +45,22 @@ pub trait Value:
     + ConstZero
     + ConstOne
     + Display
+    + Sum
+    + ToPrimitive
     + std::fmt::Debug
 {
+    const MAX: Self;
+    const MIN: Self;
+
     fn min(self, other: Self) -> Self;
     fn max(self, other: Self) -> Self;
+    fn saturating_add(self, other: Self) -> Self;
+    fn saturating_sub(self, other: Self) -> Self;
+    fn saturating_mul(self, other: Self) -> Self;
+    fn saturating_div(self, other: Self) -> Self;
+    fn saturating_neg(self) -> Self;
     fn double(self) -> Self;
+    fn is_zero(self) -> bool;
 }
 
 impl_value_for_floats!(f32, f64);
@@ -56,6 +72,9 @@ macro_rules! impl_value_for_floats {
     ($($t:ty),+ $(,)?) => {
         $(
             impl Value for $t {
+                const MAX:Self = Self::MAX;
+                const MIN:Self = Self::MIN;
+
                 fn min(self, other:Self) -> Self {
                     self.min(other)
                 }
@@ -64,8 +83,32 @@ macro_rules! impl_value_for_floats {
                     Float::max(self, other)
                 }
 
+                fn saturating_add(self, other: Self) -> Self {
+                    self + other
+                }
+
+                fn saturating_sub(self, other: Self) -> Self {
+                    self - other
+                }
+
+                fn saturating_mul(self, other: Self) -> Self {
+                    self * other
+                }
+
+                fn saturating_div(self, other: Self) -> Self {
+                    self / other
+                }
+
+                fn saturating_neg(self) -> Self {
+                    -self
+                }
+
                 fn double(self) -> Self {
-                    self * 2 as $t
+                    self * 2.0 as $t
+                }
+
+                fn is_zero(self) -> bool {
+                    self.abs() < Self::EPSILON
                 }
             }
         )+
@@ -78,6 +121,9 @@ macro_rules! impl_value_for_signed_ints {
     ($($t:ty),+ $(,)?) => {
         $(
             impl Value for $t {
+                const MAX:Self = Self::MAX;
+                const MIN:Self = Self::MIN;
+
                 fn min(self, other:Self) -> Self {
                     Ord::min(self, other)
                 }
@@ -86,8 +132,32 @@ macro_rules! impl_value_for_signed_ints {
                     Ord::max(self, other)
                 }
 
+                fn saturating_add(self, other: Self) -> Self {
+                    <$t>::saturating_add(self, other)
+                }
+
+                fn saturating_sub(self, other: Self) -> Self {
+                    <$t>::saturating_sub(self, other)
+                }
+
+                fn saturating_mul(self, other: Self) -> Self {
+                    <$t>::saturating_mul(self, other)
+                }
+
+                fn saturating_div(self, other:Self) -> Self {
+                    (Saturating(self) / Saturating(other)).0
+                }
+
+                fn saturating_neg(self) -> Self {
+                    (-Saturating(self)).0
+                }
+
                 fn double(self) -> Self {
                     self * 2 as $t
+                }
+
+                fn is_zero(self) -> bool {
+                    self == Self::ZERO
                 }
             }
         )+
@@ -151,21 +221,21 @@ impl<V: Variable> Node<V> {
                     children[3].eval(ctx)
                 }
             }
-            Add(children) => children[0].eval(ctx) + children[1].eval(ctx),
-            Sub(children) => children[0].eval(ctx) - children[1].eval(ctx),
-            Mul(children) => children[0].eval(ctx) * children[1].eval(ctx),
+            Add(children) => children[0].eval(ctx).saturating_add(children[1].eval(ctx)),
+            Sub(children) => children[0].eval(ctx).saturating_sub(children[1].eval(ctx)),
+            Mul(children) => children[0].eval(ctx).saturating_mul(children[1].eval(ctx)),
             Div(children) => {
                 let v1 = children[1].eval(ctx);
                 if v1.is_zero() {
-                    V::Value::ZERO
+                    V::Value::MAX
                 } else {
-                    children[0].eval(ctx) / v1
+                    children[0].eval(ctx).saturating_div(v1)
                 }
             }
-            Neg(children) => -children[0].eval(ctx),
+            Neg(children) => children[0].eval(ctx).saturating_neg(),
             Min(children) => children[0].eval(ctx).min(children[1].eval(ctx)),
             Max(children) => children[0].eval(ctx).max(children[1].eval(ctx)),
-            Const(value) => (*value).into(),
+            Const(value) => *value,
             Var(variable) => variable.value(ctx),
         }
     }
@@ -258,7 +328,7 @@ impl<V: Variable> Node<V> {
                 }
             }
             Node::Add([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const((*c0 + *c1).into()),
+                (Const(c0), Const(c1)) => Node::Const(*c0 + *c1),
                 (Const(v), _) if v.is_zero() => (**c1).clone(),
                 (_, Const(v)) if v.is_zero() => (**c0).clone(),
                 (c0, c1) if c0 == c1 => Node::Mul([
@@ -297,7 +367,7 @@ impl<V: Variable> Node<V> {
                 _ => self.clone(),
             },
             Node::Sub([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const((*c0 - *c1).into()),
+                (Const(c0), Const(c1)) => Node::Const(*c0 - *c1),
                 (Const(v), _) if v.is_zero() => (**c1).clone(),
                 (_, Const(v)) if v.is_zero() => (**c0).clone(),
                 (c0, Neg([c1])) => Add([Box::new(c0.clone()), c1.clone()]),
@@ -305,7 +375,7 @@ impl<V: Variable> Node<V> {
                 _ => self.clone(),
             },
             Node::Mul([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const((*c0 * *c1).into()),
+                (Const(c0), Const(c1)) => Node::Const(*c0 * *c1),
                 (Const(v), _) | (_, Const(v)) if v.is_zero() => Const(V::Value::ZERO),
                 (Const(v), _) if v.is_one() => (**c1).clone(),
                 (_, Const(v)) if v.is_one() => (**c0).clone(),
@@ -314,7 +384,7 @@ impl<V: Variable> Node<V> {
             },
             Node::Div([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
                 (Const(v), _) | (_, Const(v)) if v.is_zero() => Const(V::Value::ZERO), // zero division
-                (Const(c0), Const(c1)) => Node::Const((*c0 / *c1).into()),
+                (Const(c0), Const(c1)) => Node::Const(*c0 / *c1),
                 (left, right) if left == right => left.clone(),
                 _ => self.clone(),
             },
@@ -324,12 +394,12 @@ impl<V: Variable> Node<V> {
                 _ => self.clone(),
             },
             Node::Min([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const(c0.min(*c1).into()),
+                (Const(c0), Const(c1)) => Node::Const(c0.min(*c1)),
                 (left, right) if left == right => left.clone(),
                 _ => self.clone(),
             },
             Node::Max([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const(c0.max(*c1).into()),
+                (Const(c0), Const(c1)) => Node::Const(c0.max(*c1)),
                 (left, right) if left == right => left.clone(),
                 _ => self.clone(),
             },
@@ -465,6 +535,8 @@ pub struct Evolver<V: Variable, G> {
     rng: Random,
 }
 
+fn send(_val: &impl Send) {}
+
 impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
     pub fn new(pop_size: usize, max_tree_depth: usize, generator: G, seed: u64) -> Self {
         let mut rng = Random::seed_from_u64(seed);
@@ -480,16 +552,22 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
         }
     }
 
-    pub fn evolve(&mut self, evaluator: &impl Evaluator<V>, generations: usize) -> (Tree<V>, f64) {
-        let mut all_time_best = (Tree::default(), f64::MAX);
+    pub fn evolve(
+        &mut self,
+        evaluator: &impl Evaluator<V>,
+        generations: usize,
+    ) -> (Tree<V>, V::Value) {
+        send(&self.population);
+        let mut generation_best = (Tree::default(), V::Value::MAX);
 
+        let last_gen = generations - 1;
         for gen in 0..generations {
             println!("{gen}");
 
             let fitness = self
                 .population
-                .iter()
-                .map(|tree| evaluator.evaluate(tree))
+                .par_iter()
+                .map(|tree| evaluator.evaluate(gen, gen == last_gen, tree))
                 .collect::<Vec<_>>();
             // let depths = self.trees.iter().map(|t| t.depth()).collect::<Vec<_>>();
 
@@ -499,7 +577,7 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
                     .iter()
                     .min_by(|l, r| l.partial_cmp(r).unwrap())
                     .unwrap(),
-                fitness.iter().sum::<f64>() / fitness.len() as f64
+                fitness.iter().copied().sum::<V::Value>().to_f64().unwrap() / fitness.len() as f64
             );
             // println!(
             //     "depth min {} avg {}",
@@ -522,15 +600,18 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
             // elitism 1
             let mut next_generation = Vec::with_capacity(self.population.capacity());
             next_generation.push(self.population[best_index].clone());
-            if fitness[best_index] < all_time_best.1 {
-                println!(" >>>> found better {}", fitness[best_index]);
-                all_time_best = (self.population[best_index].clone(), fitness[best_index]);
 
-                if fitness[best_index].abs() < f64::EPSILON {
-                    println!("Found optimum");
-                    return all_time_best;
-                }
-            }
+            generation_best = (self.population[best_index].clone(), fitness[best_index]);
+
+            // if fitness[best_index] < all_time_best.1 {
+            //     println!(" >>>> found better {}", fitness[best_index]);
+            //     all_time_best = (self.population[best_index].clone(), fitness[best_index]);
+
+            //     if fitness[best_index].is_zero() {
+            //         println!("Found optimum");
+            //         return all_time_best;
+            //     }
+            // }
 
             // crossover 90%
             let crossover_target = (0.9 * (self.population.len() as f64)) as usize;
@@ -558,10 +639,10 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
 
             self.population = next_generation;
         }
-        all_time_best
+        generation_best
     }
 
-    fn select_by_tournament(fitness: &[f64], rng: &mut impl Rng) -> usize {
+    fn select_by_tournament(fitness: &[V::Value], rng: &mut impl Rng) -> usize {
         index::sample(rng, fitness.len(), 7)
             .iter()
             .min_by(|&l, &r| fitness[l].partial_cmp(&fitness[r]).unwrap())
@@ -569,8 +650,8 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
     }
 }
 
-pub trait Evaluator<V: Variable> {
-    fn evaluate(&self, individual: &Tree<V>) -> f64;
+pub trait Evaluator<V: Variable>: Send + Sync {
+    fn evaluate(&self, generation: usize, last: bool, individual: &Tree<V>) -> V::Value;
 }
 
 fn _test() {

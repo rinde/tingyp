@@ -74,7 +74,7 @@ impl Variable for Vars {
 struct Polynomial;
 
 impl Evaluator<Vars> for Polynomial {
-    fn evaluate(&self, individual: &Tree<Vars>) -> f64 {
+    fn evaluate(&self, _gen: usize, individual: &Tree<Vars>) -> f64 {
         let mut error_sum = 0.0;
         for x in 0..100 {
             let x = x as f64 / 100.0;
