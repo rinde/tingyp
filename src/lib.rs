@@ -61,6 +61,7 @@ pub trait Value:
     fn saturating_neg(self) -> Self;
     fn double(self) -> Self;
     fn is_zero(self) -> bool;
+    fn handle_infinity(value: Self) -> Self;
 }
 
 impl_value_for_floats!(f32, f64);
@@ -84,31 +85,41 @@ macro_rules! impl_value_for_floats {
                 }
 
                 fn saturating_add(self, other: Self) -> Self {
-                    self + other
+                    Self::handle_infinity(self + other)
                 }
 
                 fn saturating_sub(self, other: Self) -> Self {
-                    self - other
+                    Self::handle_infinity(self - other)
                 }
 
                 fn saturating_mul(self, other: Self) -> Self {
-                    self * other
+                    Self::handle_infinity(self * other)
                 }
 
                 fn saturating_div(self, other: Self) -> Self {
-                    self / other
+                    Self::handle_infinity(self / other)
                 }
 
                 fn saturating_neg(self) -> Self {
-                    -self
+                    Self::handle_infinity(-self)
                 }
 
                 fn double(self) -> Self {
-                    self * 2.0 as $t
+                    Self::handle_infinity(self * 2.0 as $t)
                 }
 
                 fn is_zero(self) -> bool {
                     self.abs() < Self::EPSILON
+                }
+
+                fn handle_infinity(val: Self) -> Self {
+                    if val == <$t>::INFINITY {
+                        Self::MAX
+                    } else if val == <$t>::NEG_INFINITY {
+                        Self::MIN
+                    } else {
+                        val
+                    }
                 }
             }
         )+
@@ -159,6 +170,9 @@ macro_rules! impl_value_for_signed_ints {
                 fn is_zero(self) -> bool {
                     self == Self::ZERO
                 }
+
+                // not needed for ints
+                fn handle_infinity(val: Self) -> Self { val }
             }
         )+
     };
@@ -575,7 +589,9 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
                 "fitness min {} avg {}",
                 fitness
                     .iter()
-                    .min_by(|l, r| l.partial_cmp(r).unwrap())
+                    .min_by(|l, r| l
+                        .partial_cmp(r)
+                        .unwrap_or_else(|| panic!("{l} {r} comparison failed")))
                     .unwrap(),
                 fitness.iter().copied().sum::<V::Value>().to_f64().unwrap() / fitness.len() as f64
             );
