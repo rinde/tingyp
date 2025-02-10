@@ -427,11 +427,11 @@ impl<V: Variable> Node<V> {
 pub struct Tree<V: Variable> {
     #[educe(Default = Node::Const(V::Value::ZERO))]
     root: Node<V>,
+
+    max_depth: usize,
 }
 
 impl<V: Variable> Tree<V> {
-    const MAX_DEPTH: usize = 16;
-
     fn new_random(
         max_depth: usize,
         generator: &impl RandomNodeGenerator<V>,
@@ -439,12 +439,13 @@ impl<V: Variable> Tree<V> {
     ) -> Self {
         Self {
             root: Node::<V>::grow(generator, rng, 0, max_depth),
+            max_depth,
         }
     }
 
     fn mutate(&mut self, generator: &impl RandomNodeGenerator<V>, rng: &mut impl Rng) {
         let (node, depth) = Self::pick_random(&mut self.root, 0, rng);
-        *node = Node::<V>::grow(generator, rng, 0, Self::MAX_DEPTH - depth);
+        *node = Node::<V>::grow(generator, rng, 0, self.max_depth - depth);
     }
 
     fn crossover(&mut self, other: &mut Self, rng: &mut impl Rng) {
@@ -549,8 +550,6 @@ pub struct Evolver<V: Variable, G> {
     rng: Random,
 }
 
-fn send(_val: &impl Send) {}
-
 impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
     pub fn new(pop_size: usize, max_tree_depth: usize, generator: G, seed: u64) -> Self {
         let mut rng = Random::seed_from_u64(seed);
@@ -571,7 +570,6 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
         evaluator: &impl Evaluator<V>,
         generations: usize,
     ) -> (Tree<V>, V::Value) {
-        send(&self.population);
         let mut generation_best = (Tree::default(), V::Value::MAX);
 
         let last_gen = generations - 1;
