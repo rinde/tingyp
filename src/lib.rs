@@ -18,6 +18,9 @@ use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::Serialize;
 use std::num::Saturating;
 use strum::EnumDiscriminants;
 use strum::EnumMessage;
@@ -178,8 +181,9 @@ macro_rules! impl_value_for_signed_ints {
     };
 }
 
-#[derive(Debug, EnumDiscriminants, Clone, Eq, PartialEq)]
+#[derive(Debug, EnumDiscriminants, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[strum_discriminants(derive(EnumString, EnumMessage, VariantArray, Hash))]
+#[serde(bound = "V: Serialize + DeserializeOwned, V::Value: Serialize + DeserializeOwned")]
 enum Node<V: Variable> {
     If4([Box<Node<V>>; 4]),
     Add([Box<Node<V>>; 2]),
@@ -422,13 +426,12 @@ impl<V: Variable> Node<V> {
     }
 }
 
-#[derive(Debug, Clone, Educe)]
+#[derive(Debug, Clone, Educe, Serialize, Deserialize)]
 #[educe(Default)]
+#[serde(bound = "V: Serialize + DeserializeOwned, V::Value: Serialize + DeserializeOwned")]
 pub struct Tree<V: Variable> {
     #[educe(Default = Node::Const(V::Value::ZERO))]
     root: Node<V>,
-
-    max_depth: usize,
 }
 
 impl<V: Variable> Tree<V> {
@@ -439,13 +442,17 @@ impl<V: Variable> Tree<V> {
     ) -> Self {
         Self {
             root: Node::<V>::grow(generator, rng, 0, max_depth),
-            max_depth,
         }
     }
 
-    fn mutate(&mut self, generator: &impl RandomNodeGenerator<V>, rng: &mut impl Rng) {
+    fn mutate(
+        &mut self,
+        max_depth: usize,
+        generator: &impl RandomNodeGenerator<V>,
+        rng: &mut impl Rng,
+    ) {
         let (node, depth) = Self::pick_random(&mut self.root, 0, rng);
-        *node = Node::<V>::grow(generator, rng, 0, self.max_depth - depth);
+        *node = Node::<V>::grow(generator, rng, 0, max_depth - depth);
     }
 
     fn crossover(&mut self, other: &mut Self, rng: &mut impl Rng) {
@@ -647,7 +654,7 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
             while next_generation.len() < self.population.len() {
                 let mut mutated =
                     self.population[Self::select_by_tournament(&fitness, &mut self.rng)].clone();
-                mutated.mutate(&self.generator, &mut self.rng);
+                mutated.mutate(self.max_tree_depth, &self.generator, &mut self.rng);
                 next_generation.push(mutated);
             }
 
