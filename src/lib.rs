@@ -215,6 +215,7 @@ impl<const L: usize, const N: usize, V: Variable> WeightedNodeGenerator<L, N, V>
     /// # Panics
     /// When `leafs` contains a [`NodeType`] that can have children.
     pub fn new(all: [(NodeType<V>, u8); L], leafs: [(NodeType<V>, u8); N]) -> Self {
+        assert!(L > 0 && N > 0);
         for (n, _) in leafs {
             assert!(matches!(n, NodeType::Const(_) | NodeType::Var(_)));
         }
