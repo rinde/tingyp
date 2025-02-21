@@ -1,9 +1,9 @@
-use genetic_progrs::Evaluator;
-use genetic_progrs::Evolver;
-use genetic_progrs::NodeType;
-use genetic_progrs::Tree;
-use genetic_progrs::Variable;
-use genetic_progrs::WeightedNodeGenerator;
+use tinygp::Evaluator;
+use tinygp::Evolver;
+use tinygp::NodeType;
+use tinygp::Tree;
+use tinygp::Variable;
+use tinygp::WeightedNodeGenerator;
 
 pub fn main() {
     use NodeType::*;
