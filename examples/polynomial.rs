@@ -1,3 +1,4 @@
+use nonzero_lit::usize;
 use tinygp::Evaluator;
 use tinygp::Evolver;
 use tinygp::NodeType;
@@ -30,7 +31,7 @@ pub fn main() {
         ],
     );
 
-    let mut pop = Evolver::new(500, 6, generator, 0);
+    let mut pop = Evolver::new(usize!(500), 6, generator, 0);
 
     let best = pop.evolve(&Polynomial, 100);
 

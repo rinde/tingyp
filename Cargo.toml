@@ -17,11 +17,13 @@ rand = "0.9.0"
 rand_xoshiro = "0.7.0"
 rayon = "1.10.0"
 serde = { version = "1.0.218", features = ["derive"] }
+nonempty-collections = "0.3.0"
 num = "0.4.3"
 strum = { version = "0.27.1", features = ["derive"] }
 
 [dev-dependencies]
 serde_json = "1.0.139"
+nonzero_lit = "0.1.2"
 
 [lints.rust]
 macro_use_extern_crate = "warn"
@@ -34,7 +36,7 @@ unreachable_pub = "warn"
 unsafe_code = "forbid"
 unstable_features = "forbid"
 unused = { level = "warn", priority = -1 }
-unused_crate_dependencies = "warn"    # too many false positives
+unused_crate_dependencies = "allow"    # too many false positives
 unused_extern_crates = "warn"         # too many false positives
 unused_import_braces = "warn"
 unused_lifetimes = "warn"
@@ -64,6 +66,10 @@ allow_attributes_without_reason = "deny"
 ### Pedantic
 pedantic = { level = "warn", priority = -1 } # setting a lower priority for the group to allow individual overrides
 missing_errors_doc = "allow" # TODO
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+enum_glob_use = "allow"
 
 [package.metadata.docs.rs]
 all-features = true

@@ -3,9 +3,14 @@ use std::array;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::iter::Sum;
+use std::num::NonZeroUsize;
+use std::num::Saturating;
 use std::ops::Neg;
 
 use educe::Educe;
+use nonempty_collections::IntoIteratorExt;
+use nonempty_collections::NEVec;
+use nonempty_collections::NonEmptyIterator;
 use num::Float;
 use num::Num;
 use num::One;
@@ -17,12 +22,12 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::seq::index;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::num::Saturating;
 use strum::EnumDiscriminants;
 use strum::EnumMessage;
 use strum::EnumString;
@@ -209,7 +214,6 @@ enum Node<V: Variable> {
     Var(V),
 }
 
-#[expect(clippy::enum_glob_use, reason = "conciseness")]
 impl<V: Variable> Node<V> {
     const fn has_children(&self) -> bool {
         use Node::*;
@@ -414,7 +418,7 @@ impl<V: Variable> Node<V> {
                 _ => self.clone(),
             },
             Div([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(v), _) | (_, Const(v)) if v.is_zero() => Const(V::Value::ZERO), // zero division
+                (Const(v), _) | (_, Const(v)) if v.is_zero() => Const(V::Value::ZERO), /* zero division */
                 (Const(c0), Const(c1)) => Const(*c0 / *c1),
                 (left, right) if left == right => left.clone(),
                 _ => self.clone(),
@@ -570,19 +574,22 @@ impl<const L: usize, const N: usize, V: Variable> RandomNodeGenerator<V>
 
 #[derive(Debug, Clone)]
 pub struct Evolver<V: Variable, G> {
-    population: Vec<Tree<V>>,
+    population: NEVec<Tree<V>>,
     max_tree_depth: usize,
     generator: G,
     rng: Random,
 }
 
 impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
-    pub fn new(pop_size: usize, max_tree_depth: usize, generator: G, seed: u64) -> Self {
+    #[expect(clippy::missing_panics_doc, reason = "false positive")]
+    pub fn new(pop_size: NonZeroUsize, max_tree_depth: usize, generator: G, seed: u64) -> Self {
         let mut rng = Random::seed_from_u64(seed);
         Self {
             population: std::iter::repeat_with(|| {
                 Tree::new_random(max_tree_depth, &generator, &mut rng)
             })
+            .try_into_nonempty_iter()
+            .unwrap() // TODO this can be avoided with an update to nonempty-collections
             .take(pop_size)
             .collect(),
             max_tree_depth,
@@ -591,6 +598,7 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
         }
     }
 
+    #[expect(clippy::missing_panics_doc, reason = "false positive")]
     pub fn evolve(
         &mut self,
         evaluator: &impl Evaluator<V>,
@@ -602,50 +610,60 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
         for generation in 0..generations {
             println!("{generation}");
 
-            let fitness = self
-                .population
-                .par_iter()
-                .map(|tree| evaluator.evaluate(generation, generation == last_gen, tree))
-                .collect::<Vec<_>>();
-            // let depths = self.trees.iter().map(|t| t.depth()).collect::<Vec<_>>();
+            let pop2 = self.population.iter().enumerate().collect::<Vec<_>>();
 
+            let fitness = pop2
+                .par_iter()
+                .enumerate()
+                .map(|(i, (i2, tree))| {
+                    assert_eq!(i, *i2);
+                    (
+                        i,
+                        evaluator.evaluate(generation, generation == last_gen, tree),
+                    )
+                })
+                .collect::<Vec<_>>(); // TODO with rayon support for nonempty-collections we could collect into a NEVec here
+            debug_assert!(fitness.is_sorted_by_key(|x| x.0));
+
+            let sum = fitness
+                .iter()
+                .map(|(_, f)| *f)
+                .sum::<V::Value>()
+                .to_f64()
+                .unwrap();
             println!(
                 "fitness min {} avg {}",
                 fitness
                     .iter()
+                    .map(|(_, f)| f)
                     .min_by(|l, r| l
                         .partial_cmp(r)
-                        .unwrap_or_else(|| panic!("{l} {r} comparison failed")))
+                        .unwrap_or_else(|| panic!("{l:?} {r:?} comparison failed")))
                     .unwrap(),
-                fitness.iter().copied().sum::<V::Value>().to_f64().unwrap() / fitness.len() as f64
+                sum / fitness.len() as f64
             );
-            // println!(
-            //     "depth min {} avg {}",
-            //     depths
-            //         .iter()
-            //         .min_by(|l, r| l.partial_cmp(r).unwrap())
-            //         .unwrap(),
-            //     depths.iter().sum::<usize>() as f64 / fitness.len() as f64
-            // );
 
             // println!("{fitness:?}");
 
             let best_index = fitness
                 .iter()
-                .enumerate()
                 .min_by(|(_, f1), (_, f2)| f1.partial_cmp(f2).unwrap())
                 .map(|(i, _)| i)
+                .copied()
                 .unwrap();
 
             // elitism 1
-            let mut next_generation = Vec::with_capacity(self.population.capacity());
-            next_generation.push(self.population[best_index].clone());
+            let mut next_generation = NEVec::with_capacity(
+                self.population.capacity(),
+                self.population[best_index].clone(),
+            );
 
-            generation_best = (self.population[best_index].clone(), fitness[best_index]);
+            generation_best = (self.population[best_index].clone(), fitness[best_index].1);
 
             // if fitness[best_index] < all_time_best.1 {
             //     println!(" >>>> found better {}", fitness[best_index]);
-            //     all_time_best = (self.population[best_index].clone(), fitness[best_index]);
+            //     all_time_best = (self.population[best_index].clone(),
+            // fitness[best_index]);
 
             //     if fitness[best_index].is_zero() {
             //         println!("Found optimum");
@@ -654,8 +672,8 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
             // }
 
             // crossover 90%
-            let crossover_target = (0.9 * (self.population.len() as f64)) as usize;
-            while next_generation.len() < crossover_target {
+            let crossover_target = (0.9 * (self.population.len().get() as f64)) as usize;
+            while next_generation.len().get() < crossover_target {
                 let mut p1 =
                     self.population[Self::select_by_tournament(&fitness, &mut self.rng)].clone();
                 let mut p2 =
@@ -682,7 +700,7 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
         generation_best
     }
 
-    fn select_by_tournament(fitness: &[V::Value], rng: &mut impl Rng) -> usize {
+    fn select_by_tournament(fitness: &[(usize, V::Value)], rng: &mut impl Rng) -> usize {
         index::sample(rng, fitness.len(), 7)
             .iter()
             .min_by(|&l, &r| fitness[l].partial_cmp(&fitness[r]).unwrap())
