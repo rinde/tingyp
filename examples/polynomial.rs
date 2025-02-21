@@ -5,6 +5,7 @@ use tinygp::Tree;
 use tinygp::Variable;
 use tinygp::WeightedNodeGenerator;
 
+#[expect(clippy::enum_glob_use, reason = "conciseness")]
 pub fn main() {
     use NodeType::*;
     let generator = WeightedNodeGenerator::new(
@@ -77,7 +78,7 @@ impl Evaluator<Vars> for Polynomial {
     fn evaluate(&self, _gen: usize, _last_gen: bool, individual: &Tree<Vars>) -> f64 {
         let mut error_sum = 0.0;
         for x in 0..100 {
-            let x = x as f64 / 100.0;
+            let x = f64::from(x) / 100.0;
             let expected_y = (x * 3.0) + 4.0;
             let context = Context { x };
             let actual_y = individual.eval(&context);

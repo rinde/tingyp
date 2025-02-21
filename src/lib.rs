@@ -42,7 +42,7 @@ pub trait Variable: Clone + Copy + Eq + PartialEq + std::fmt::Debug + Send + Syn
 
 pub trait Value:
     Num
-    + std::ops::Neg<Output = Self>
+    + Neg<Output = Self>
     + PartialOrd
     + Clone
     + Copy
@@ -56,15 +56,25 @@ pub trait Value:
     const MAX: Self;
     const MIN: Self;
 
+    #[must_use]
     fn min(self, other: Self) -> Self;
+    #[must_use]
     fn max(self, other: Self) -> Self;
+    #[must_use]
     fn saturating_add(self, other: Self) -> Self;
+    #[must_use]
     fn saturating_sub(self, other: Self) -> Self;
+    #[must_use]
     fn saturating_mul(self, other: Self) -> Self;
+    #[must_use]
     fn saturating_div(self, other: Self) -> Self;
+    #[must_use]
     fn saturating_neg(self) -> Self;
+    #[must_use]
     fn double(self) -> Self;
+    #[must_use]
     fn is_zero(self) -> bool;
+    #[must_use]
     fn handle_infinity(value: Self) -> Self;
 }
 
@@ -199,8 +209,9 @@ enum Node<V: Variable> {
     Var(V),
 }
 
+#[expect(clippy::enum_glob_use, reason = "conciseness")]
 impl<V: Variable> Node<V> {
-    pub fn has_children(&self) -> bool {
+    const fn has_children(&self) -> bool {
         use Node::*;
         match self {
             If4(_) | Add(_) | Sub(_) | Mul(_) | Div(_) | Neg(_) | Min(_) | Max(_) => true,
@@ -208,7 +219,7 @@ impl<V: Variable> Node<V> {
         }
     }
 
-    pub fn children(&self) -> impl Iterator<Item = &Box<Node<V>>> {
+    fn children(&self) -> impl Iterator<Item = &Box<Node<V>>> {
         use Node::*;
         match self {
             If4(children) => children.iter(),
@@ -219,7 +230,7 @@ impl<V: Variable> Node<V> {
         }
     }
 
-    pub fn children_mut(&mut self) -> Option<&mut [Box<Node<V>>]> {
+    fn children_mut(&mut self) -> Option<&mut [Box<Node<V>>]> {
         use Node::*;
         match self {
             If4(children) => Some(children),
@@ -230,7 +241,7 @@ impl<V: Variable> Node<V> {
         }
     }
 
-    pub fn eval(&self, ctx: &V::Context) -> V::Value {
+    fn eval(&self, ctx: &V::Context) -> V::Value {
         use Node::*;
         match self {
             If4(children) => {
@@ -265,11 +276,11 @@ impl<V: Variable> Node<V> {
         depth: usize,
         limit: usize,
     ) -> Node<T> {
-        use NodeType::*;
+        use Node::*;
         if depth >= limit {
             return match generator.generate_no_children(rng) {
-                Const(value) => Node::Const(value),
-                Var(variable) => Node::Var(variable),
+                NodeType::Const(value) => Const(value),
+                NodeType::Var(variable) => Var(variable),
                 _ => panic!(),
             };
         }
@@ -277,23 +288,24 @@ impl<V: Variable> Node<V> {
         let new_node_type = generator.generate(rng);
         let fun = |_| Box::new(Self::grow(generator, rng, new_depth, limit));
         match new_node_type {
-            If4 => Node::If4(array::from_fn(fun)),
-            Add => Node::Add(array::from_fn(fun)),
-            Sub => Node::Sub(array::from_fn(fun)),
-            Mul => Node::Mul(array::from_fn(fun)),
-            Div => Node::Div(array::from_fn(fun)),
-            Neg => Node::Neg(array::from_fn(fun)),
-            Min => Node::Min(array::from_fn(fun)),
-            Max => Node::Max(array::from_fn(fun)),
-            Const(value) => Node::Const(value),
-            Var(variable) => Node::Var(variable),
+            NodeType::If4 => If4(array::from_fn(fun)),
+            NodeType::Add => Add(array::from_fn(fun)),
+            NodeType::Sub => Sub(array::from_fn(fun)),
+            NodeType::Mul => Mul(array::from_fn(fun)),
+            NodeType::Div => Div(array::from_fn(fun)),
+            NodeType::Neg => Neg(array::from_fn(fun)),
+            NodeType::Min => Min(array::from_fn(fun)),
+            NodeType::Max => Max(array::from_fn(fun)),
+            NodeType::Const(value) => Const(value),
+            NodeType::Var(variable) => Var(variable),
         }
     }
 
     // TODO test that the rust code is identical to eval()
     fn to_rust(&self) -> String {
+        use Node::*;
         match self {
-            Node::If4([c0, c1, c2, c3]) => {
+            If4([c0, c1, c2, c3]) => {
                 format!(
                     "if {} < {} {{ {} }} else {{ {} }}",
                     c0.to_rust(),
@@ -302,27 +314,27 @@ impl<V: Variable> Node<V> {
                     c3.to_rust()
                 )
             }
-            Node::Add([c0, c1]) => match (**c0).clone() {
-                c0 @ Node::If4(_) => format!("({}) + {}", c0.to_rust(), c1.to_rust()),
+            Add([c0, c1]) => match (**c0).clone() {
+                c0 @ If4(_) => format!("({}) + {}", c0.to_rust(), c1.to_rust()),
                 c0 => format!("{} + {}", c0.to_rust(), c1.to_rust()),
             },
-            Node::Sub([c0, c1]) => match (**c0).clone() {
-                c0 @ Node::If4(_) => format!("({}) - {}", c0.to_rust(), c1.to_rust()),
+            Sub([c0, c1]) => match (**c0).clone() {
+                c0 @ If4(_) => format!("({}) - {}", c0.to_rust(), c1.to_rust()),
                 c0 => format!("{} - {}", c0.to_rust(), c1.to_rust()),
             },
-            Node::Mul([c0, c1]) => match (**c0).clone() {
-                c0 @ Node::If4(_) => format!("({}) * {}", c0.to_rust(), c1.to_rust()),
+            Mul([c0, c1]) => match (**c0).clone() {
+                c0 @ If4(_) => format!("({}) * {}", c0.to_rust(), c1.to_rust()),
                 c0 => format!("{} * {}", c0.to_rust(), c1.to_rust()),
             },
-            Node::Div([c0, c1]) => match (**c0).clone() {
-                c0 @ Node::If4(_) => format!("({}) / {}", c0.to_rust(), c1.to_rust()),
+            Div([c0, c1]) => match (**c0).clone() {
+                c0 @ If4(_) => format!("({}) / {}", c0.to_rust(), c1.to_rust()),
                 c0 => format!("{} / {}", c0.to_rust(), c1.to_rust()),
             },
-            Node::Neg([c0]) => format!("-{}", c0.to_rust()),
-            Node::Min([c0, c1]) => format!("f64::min({}, {})", c0.to_rust(), c1.to_rust()),
-            Node::Max([c0, c1]) => format!("f64::max({}, {})", c0.to_rust(), c1.to_rust()),
-            Node::Const(value) => format!("{:.2}", value),
-            Node::Var(v) => v.name().to_string(),
+            Neg([c0]) => format!("-{}", c0.to_rust()),
+            Min([c0, c1]) => format!("f64::min({}, {})", c0.to_rust(), c1.to_rust()),
+            Max([c0, c1]) => format!("f64::max({}, {})", c0.to_rust(), c1.to_rust()),
+            Const(value) => format!("{value:.2}"),
+            Var(v) => v.name().to_string(),
         }
     }
 
@@ -333,8 +345,8 @@ impl<V: Variable> Node<V> {
             c.simplify();
         }
         *self = match self {
-            Node::If4([c0, c1, c2, c3]) => {
-                if let (Node::Const(c0), Node::Const(c1)) = (c0.as_ref(), c1.as_ref()) {
+            If4([c0, c1, c2, c3]) => {
+                if let (Const(c0), Const(c1)) = (c0.as_ref(), c1.as_ref()) {
                     if c0 < c1 {
                         (**c2).clone()
                     } else {
@@ -346,18 +358,18 @@ impl<V: Variable> Node<V> {
                     self.clone()
                 }
             }
-            Node::Add([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const(*c0 + *c1),
+            Add([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
+                (Const(c0), Const(c1)) => Const(*c0 + *c1),
                 (Const(v), _) if v.is_zero() => (**c1).clone(),
                 (_, Const(v)) if v.is_zero() => (**c0).clone(),
-                (c0, c1) if c0 == c1 => Node::Mul([
-                    Box::new(Node::Const(V::Value::ONE.double())),
+                (c0, c1) if c0 == c1 => Mul([
+                    Box::new(Const(V::Value::ONE.double())),
                     Box::new(c0.clone()),
                 ]),
                 (Mul([c00, c01]), c1) if *c1 == **c01 => {
-                    let mut inner_add = Node::Add([c00.clone(), Box::new(Const(V::Value::ONE))]);
+                    let mut inner_add = Add([c00.clone(), Box::new(Const(V::Value::ONE))]);
                     inner_add.simplify();
-                    Node::Mul([Box::new(inner_add), c01.clone()])
+                    Mul([Box::new(inner_add), c01.clone()])
                 }
                 // (Add([c0, c1]), c2) | (c2, Add([c0, c1])) => {
                 //     let map = [**c0, **c1, *c2]
@@ -385,44 +397,44 @@ impl<V: Variable> Node<V> {
                 // ]),
                 _ => self.clone(),
             },
-            Node::Sub([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const(*c0 - *c1),
+            Sub([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
+                (Const(c0), Const(c1)) => Const(*c0 - *c1),
                 (Const(v), _) if v.is_zero() => (**c1).clone(),
                 (_, Const(v)) if v.is_zero() => (**c0).clone(),
                 (c0, Neg([c1])) => Add([Box::new(c0.clone()), c1.clone()]),
-                (left, right) if left == right => Node::Const(V::Value::ZERO),
+                (left, right) if left == right => Const(V::Value::ZERO),
                 _ => self.clone(),
             },
-            Node::Mul([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const(*c0 * *c1),
+            Mul([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
+                (Const(c0), Const(c1)) => Const(*c0 * *c1),
                 (Const(v), _) | (_, Const(v)) if v.is_zero() => Const(V::Value::ZERO),
                 (Const(v), _) if v.is_one() => (**c1).clone(),
                 (_, Const(v)) if v.is_one() => (**c0).clone(),
-                (c0, c1 @ Const(_)) => Node::Mul([Box::new(c1.clone()), Box::new(c0.clone())]),
+                (c0, c1 @ Const(_)) => Mul([Box::new(c1.clone()), Box::new(c0.clone())]),
                 _ => self.clone(),
             },
-            Node::Div([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
+            Div([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
                 (Const(v), _) | (_, Const(v)) if v.is_zero() => Const(V::Value::ZERO), // zero division
-                (Const(c0), Const(c1)) => Node::Const(*c0 / *c1),
+                (Const(c0), Const(c1)) => Const(*c0 / *c1),
                 (left, right) if left == right => left.clone(),
                 _ => self.clone(),
             },
-            Node::Neg([c0]) => match c0.as_ref() {
+            Neg([c0]) => match c0.as_ref() {
                 Const(v) => Const(v.neg()),
                 Neg([inner]) => (**inner).clone(), // double negation
                 _ => self.clone(),
             },
-            Node::Min([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const(c0.min(*c1)),
+            Min([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
+                (Const(c0), Const(c1)) => Const(c0.min(*c1)),
                 (left, right) if left == right => left.clone(),
                 _ => self.clone(),
             },
-            Node::Max([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
-                (Const(c0), Const(c1)) => Node::Const(c0.max(*c1)),
+            Max([c0, c1]) => match (c0.as_ref(), c1.as_ref()) {
+                (Const(c0), Const(c1)) => Const(c0.max(*c1)),
                 (left, right) if left == right => left.clone(),
                 _ => self.clone(),
             },
-            Node::Const(_) | Node::Var(_) => self.clone(),
+            Const(_) | Var(_) => self.clone(),
         };
     }
 }
@@ -525,12 +537,17 @@ pub trait RandomNodeGenerator<V: Variable> {
     fn generate_no_children(&self, rng: &mut impl Rng) -> NodeType<V>;
 }
 
+#[derive(Debug, Clone)]
 pub struct WeightedNodeGenerator<const L: usize, const N: usize, V: Variable> {
     all: [(NodeType<V>, u8); L],
     leafs: [(NodeType<V>, u8); N],
 }
 
 impl<const L: usize, const N: usize, V: Variable> WeightedNodeGenerator<L, N, V> {
+    /// Creates a new [`WeightedNodeGenerator`] with the specified weights.
+    ///
+    /// # Panics
+    /// When `leafs` contains a [`NodeType`] that can have children.
     pub fn new(all: [(NodeType<V>, u8); L], leafs: [(NodeType<V>, u8); N]) -> Self {
         for (n, _) in leafs {
             assert!(matches!(n, NodeType::Const(_) | NodeType::Var(_)));
@@ -551,6 +568,7 @@ impl<const L: usize, const N: usize, V: Variable> RandomNodeGenerator<V>
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Evolver<V: Variable, G> {
     population: Vec<Tree<V>>,
     max_tree_depth: usize,

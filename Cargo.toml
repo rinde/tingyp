@@ -1,19 +1,69 @@
 [package]
 name = "tinygp"
+description = "A tiny genetic programming library"
+repository = "https://github.com/rinde/tinygp"
 edition = "2024"
 version = "0.1.0"
-
+authors = ["Rinde van Lon"]
+rust-version = "1.85.0"
+license = "MIT OR Apache-2.0"
+keywords = ["genetic programming", "evolution", "tiny"]
+categories = ["algorithms"]
 [features]
 
 [dependencies]
 educe = "0.6.0"
-more_collections = { version = "0.14.3", features = ["all"] }
-derive_more = { version = "2.0.1", features = ["from", "into", "mul", "mul_assign", "add", "add_assign", "not"] }
 rand = "0.9.0"
 rand_xoshiro = "0.7.0"
 rayon = "1.10.0"
-serde = "1.0.218"
-serde_json = "1.0.139"
-itertools = "0.14.0"
+serde = { version = "1.0.218", features = ["derive"] }
 num = "0.4.3"
 strum = { version = "0.27.1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.139"
+
+[lints.rust]
+macro_use_extern_crate = "warn"
+meta_variable_misuse = "warn"
+missing_copy_implementations = "warn"
+missing_debug_implementations = "warn"
+missing_docs = "allow" # TODO
+single_use_lifetimes = "warn"
+unreachable_pub = "warn"
+unsafe_code = "forbid"
+unstable_features = "forbid"
+unused = { level = "warn", priority = -1 }
+unused_crate_dependencies = "warn"    # too many false positives
+unused_extern_crates = "warn"         # too many false positives
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
+unused_results = "warn"
+dead_code = "warn"
+
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+missing_crate_level_docs = "warn"
+
+[lints.clippy]
+cargo = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+todo = "warn"
+missing_const_for_fn = "warn"
+
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+### Pedantic
+pedantic = { level = "warn", priority = -1 } # setting a lower priority for the group to allow individual overrides
+missing_errors_doc = "allow" # TODO
+
+[package.metadata.docs.rs]
+all-features = true
