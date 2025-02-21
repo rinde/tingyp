@@ -79,7 +79,7 @@ impl Evaluator<Vars> for Polynomial {
         for x in 0..100 {
             let x = x as f64 / 100.0;
             let expected_y = (x * 3.0) + 4.0;
-            let context = Context { x: x };
+            let context = Context { x };
             let actual_y = individual.eval(&context);
             error_sum += (actual_y - expected_y).abs();
         }
