@@ -37,3 +37,6 @@ update-readme:
 
 check-readme:
     cargo rdme --check
+
+check-unused-dependencies:
+    cargo udeps

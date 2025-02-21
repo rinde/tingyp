@@ -1,4 +1,4 @@
-//!
+//! A tiny genetic programming library.
 use std::array;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -6,22 +6,22 @@ use std::iter::Sum;
 use std::ops::Neg;
 
 use educe::Educe;
-use num::traits::ConstOne;
-use num::traits::ConstZero;
 use num::Float;
 use num::Num;
 use num::One;
 use num::ToPrimitive;
 use num::Zero;
-use rand::seq::index;
+use num::traits::ConstOne;
+use num::traits::ConstZero;
 use rand::Rng;
 use rand::SeedableRng;
+use rand::seq::index;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::num::Saturating;
 use strum::EnumDiscriminants;
 use strum::EnumMessage;
@@ -471,8 +471,8 @@ impl<V: Variable> Tree<V> {
             return (node, depth);
         }
         let children = node.children_mut().unwrap();
-        let chosen = &mut children[rng.gen_range(0..children.len())];
-        if rng.gen_bool(0.5) {
+        let chosen = &mut children[rng.random_range(0..children.len())];
+        if rng.random_bool(0.5) {
             // pick this one
             (chosen, depth)
         } else {
@@ -543,11 +543,11 @@ impl<const L: usize, const N: usize, V: Variable> RandomNodeGenerator<V>
     for WeightedNodeGenerator<L, N, V>
 {
     fn generate(&self, rng: &mut impl Rng) -> NodeType<V> {
-        self.all[rng.gen_range(0..L)].0
+        self.all[rng.random_range(0..L)].0
     }
 
     fn generate_no_children(&self, rng: &mut impl Rng) -> NodeType<V> {
-        self.leafs[rng.gen_range(0..N)].0
+        self.leafs[rng.random_range(0..N)].0
     }
 }
 
@@ -581,13 +581,13 @@ impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
         let mut generation_best = (Tree::default(), V::Value::MAX);
 
         let last_gen = generations - 1;
-        for gen in 0..generations {
-            println!("{gen}");
+        for generation in 0..generations {
+            println!("{generation}");
 
             let fitness = self
                 .population
                 .par_iter()
-                .map(|tree| evaluator.evaluate(gen, gen == last_gen, tree))
+                .map(|tree| evaluator.evaluate(generation, generation == last_gen, tree))
                 .collect::<Vec<_>>();
             // let depths = self.trees.iter().map(|t| t.depth()).collect::<Vec<_>>();
 
