@@ -31,7 +31,7 @@ pub fn main() {
         ],
     );
 
-    let mut pop = Evolver::new(usize!(500), 6, generator, 0);
+    let mut pop = Evolver::new(usize!(500), usize!(6), generator, 0);
 
     let best = pop.evolve(&Polynomial, 100);
 

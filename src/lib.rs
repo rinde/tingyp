@@ -35,6 +35,205 @@ use strum::VariantArray;
 
 pub type Random = Xoshiro256PlusPlus;
 
+#[derive(Debug, Clone)]
+pub struct Evolver<V: Variable, G> {
+    population: NEVec<Tree<V>>,
+    max_tree_depth: NonZeroUsize,
+    generator: G,
+    rng: Random,
+}
+
+impl<V, G> Evolver<V, G>
+where
+    V: Variable,
+    G: RandomNodeGenerator<V>,
+{
+    #[expect(clippy::missing_panics_doc, reason = "false positive")]
+    pub fn new(
+        pop_size: NonZeroUsize,
+        max_tree_depth: NonZeroUsize,
+        generator: G,
+        seed: u64,
+    ) -> Self {
+        let mut rng = Random::seed_from_u64(seed);
+        Self {
+            population: std::iter::repeat_with(|| {
+                Tree::new_random(max_tree_depth.get(), &generator, &mut rng)
+            })
+            .try_into_nonempty_iter()
+            .unwrap() // TODO this can be avoided with an update to nonempty-collections
+            .take(pop_size)
+            .collect(),
+            max_tree_depth,
+            generator,
+            rng,
+        }
+    }
+
+    #[expect(clippy::missing_panics_doc, reason = "false positive")]
+    pub fn evolve(
+        &mut self,
+        evaluator: &impl Evaluator<V>,
+        generations: usize,
+    ) -> (Tree<V>, V::Value) {
+        let mut generation_best = (Tree::default(), V::Value::MAX);
+
+        let last_gen = generations - 1;
+        for generation in 0..generations {
+            println!("{generation}");
+
+            let pop2 = self.population.iter().enumerate().collect::<Vec<_>>();
+
+            let fitness = pop2
+                .par_iter()
+                .enumerate()
+                .map(|(i, (i2, tree))| {
+                    assert_eq!(i, *i2);
+                    (
+                        i,
+                        evaluator.evaluate(generation, generation == last_gen, tree),
+                    )
+                })
+                .collect::<Vec<_>>(); // TODO with rayon support for nonempty-collections we could collect into a NEVec here
+            debug_assert!(fitness.is_sorted_by_key(|x| x.0));
+
+            let sum = fitness
+                .iter()
+                .map(|(_, f)| *f)
+                .sum::<V::Value>()
+                .to_f64()
+                .unwrap();
+            println!(
+                "fitness min {} avg {}",
+                fitness
+                    .iter()
+                    .map(|(_, f)| f)
+                    .min_by(|l, r| l
+                        .partial_cmp(r)
+                        .unwrap_or_else(|| panic!("{l:?} {r:?} comparison failed")))
+                    .unwrap(),
+                sum / fitness.len() as f64
+            );
+
+            // println!("{fitness:?}");
+
+            let best_index = fitness
+                .iter()
+                .min_by(|(_, f1), (_, f2)| f1.partial_cmp(f2).unwrap())
+                .map(|(i, _)| i)
+                .copied()
+                .unwrap();
+
+            // elitism 1
+            let mut next_generation = NEVec::with_capacity(
+                self.population.capacity(),
+                self.population[best_index].clone(),
+            );
+
+            generation_best = (self.population[best_index].clone(), fitness[best_index].1);
+
+            // if fitness[best_index] < all_time_best.1 {
+            //     println!(" >>>> found better {}", fitness[best_index]);
+            //     all_time_best = (self.population[best_index].clone(),
+            // fitness[best_index]);
+
+            //     if fitness[best_index].is_zero() {
+            //         println!("Found optimum");
+            //         return all_time_best;
+            //     }
+            // }
+
+            // crossover 90%
+            let crossover_target = (0.9 * (self.population.len().get() as f64)) as usize;
+            while next_generation.len().get() < crossover_target {
+                let mut p1 =
+                    self.population[Self::select_by_tournament(&fitness, &mut self.rng)].clone();
+                let mut p2 =
+                    self.population[Self::select_by_tournament(&fitness, &mut self.rng)].clone();
+                p1.crossover(&mut p2, &mut self.rng);
+
+                next_generation.extend(
+                    [p1, p2]
+                        .into_iter()
+                        .filter(|p| p.depth() < self.max_tree_depth.get()),
+                );
+            }
+
+            // mutation 10% (rest)
+            while next_generation.len() < self.population.len() {
+                let mut mutated =
+                    self.population[Self::select_by_tournament(&fitness, &mut self.rng)].clone();
+                mutated.mutate(self.max_tree_depth.get(), &self.generator, &mut self.rng);
+                next_generation.push(mutated);
+            }
+
+            self.population = next_generation;
+        }
+        generation_best
+    }
+
+    fn select_by_tournament(fitness: &[(usize, V::Value)], rng: &mut impl Rng) -> usize {
+        index::sample(rng, fitness.len(), 7)
+            .iter()
+            .min_by(|&l, &r| fitness[l].partial_cmp(&fitness[r]).unwrap())
+            .unwrap()
+    }
+}
+
+pub trait Evaluator<V: Variable>: Send + Sync {
+    fn evaluate(&self, generation: usize, last: bool, individual: &Tree<V>) -> V::Value;
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub enum NodeType<V: Variable> {
+    If4,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Neg,
+    Min,
+    Max,
+    Const(V::Value),
+    Var(V),
+}
+
+pub trait RandomNodeGenerator<V: Variable> {
+    fn generate(&self, rng: &mut impl Rng) -> NodeType<V>;
+    fn generate_no_children(&self, rng: &mut impl Rng) -> NodeType<V>;
+}
+
+#[derive(Debug, Clone)]
+pub struct WeightedNodeGenerator<const L: usize, const N: usize, V: Variable> {
+    all: [(NodeType<V>, u8); L],
+    leafs: [(NodeType<V>, u8); N],
+}
+
+impl<const L: usize, const N: usize, V: Variable> WeightedNodeGenerator<L, N, V> {
+    /// Creates a new [`WeightedNodeGenerator`] with the specified weights.
+    ///
+    /// # Panics
+    /// When `leafs` contains a [`NodeType`] that can have children.
+    pub fn new(all: [(NodeType<V>, u8); L], leafs: [(NodeType<V>, u8); N]) -> Self {
+        for (n, _) in leafs {
+            assert!(matches!(n, NodeType::Const(_) | NodeType::Var(_)));
+        }
+        Self { all, leafs }
+    }
+}
+
+impl<const L: usize, const N: usize, V: Variable> RandomNodeGenerator<V>
+    for WeightedNodeGenerator<L, N, V>
+{
+    fn generate(&self, rng: &mut impl Rng) -> NodeType<V> {
+        self.all[rng.random_range(0..L)].0
+    }
+
+    fn generate_no_children(&self, rng: &mut impl Rng) -> NodeType<V> {
+        self.leafs[rng.random_range(0..N)].0
+    }
+}
+
 pub trait Variable: Clone + Copy + Eq + PartialEq + std::fmt::Debug + Send + Sync {
     type Value: Value + Send + Sync;
 
@@ -83,118 +282,83 @@ pub trait Value:
     fn handle_infinity(value: Self) -> Self;
 }
 
-impl_value_for_floats!(f32, f64);
-impl_value_for_signed_ints!(i8, i16, i32, i64, i128, isize);
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! impl_value_for_floats {
-    ($($t:ty),+ $(,)?) => {
-        $(
-            impl Value for $t {
-                const MAX:Self = Self::MAX;
-                const MIN:Self = Self::MIN;
-
-                fn min(self, other:Self) -> Self {
-                    self.min(other)
-                }
-
-                fn max(self, other: Self) -> Self {
-                    Float::max(self, other)
-                }
-
-                fn saturating_add(self, other: Self) -> Self {
-                    Self::handle_infinity(self + other)
-                }
-
-                fn saturating_sub(self, other: Self) -> Self {
-                    Self::handle_infinity(self - other)
-                }
-
-                fn saturating_mul(self, other: Self) -> Self {
-                    Self::handle_infinity(self * other)
-                }
-
-                fn saturating_div(self, other: Self) -> Self {
-                    Self::handle_infinity(self / other)
-                }
-
-                fn saturating_neg(self) -> Self {
-                    Self::handle_infinity(-self)
-                }
-
-                fn double(self) -> Self {
-                    Self::handle_infinity(self * 2.0 as $t)
-                }
-
-                fn is_zero(self) -> bool {
-                    self.abs() < Self::EPSILON
-                }
-
-                fn handle_infinity(val: Self) -> Self {
-                    if val == <$t>::INFINITY {
-                        Self::MAX
-                    } else if val == <$t>::NEG_INFINITY {
-                        Self::MIN
-                    } else {
-                        val
-                    }
-                }
-            }
-        )+
-    };
+#[derive(Debug, Clone, Educe, Serialize, Deserialize)]
+#[educe(Default)]
+#[serde(bound = "V: Serialize + DeserializeOwned, V::Value: Serialize + DeserializeOwned")]
+pub struct Tree<V: Variable> {
+    #[educe(Default = Node::Const(V::Value::ZERO))]
+    root: Node<V>,
 }
 
-#[doc(hidden)]
-#[macro_export]
-macro_rules! impl_value_for_signed_ints {
-    ($($t:ty),+ $(,)?) => {
-        $(
-            impl Value for $t {
-                const MAX:Self = Self::MAX;
-                const MIN:Self = Self::MIN;
+impl<V: Variable> Tree<V> {
+    fn new_random(
+        max_depth: usize,
+        generator: &impl RandomNodeGenerator<V>,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            root: Node::<V>::grow(generator, rng, 0, max_depth),
+        }
+    }
 
-                fn min(self, other:Self) -> Self {
-                    Ord::min(self, other)
-                }
+    fn mutate(
+        &mut self,
+        max_depth: usize,
+        generator: &impl RandomNodeGenerator<V>,
+        rng: &mut impl Rng,
+    ) {
+        let (node, depth) = Self::pick_random(&mut self.root, 0, rng);
+        *node = Node::<V>::grow(generator, rng, 0, max_depth - depth);
+    }
 
-                fn max(self, other: Self) -> Self {
-                    Ord::max(self, other)
-                }
+    fn crossover(&mut self, other: &mut Self, rng: &mut impl Rng) {
+        let (one, _) = Tree::pick_random(&mut self.root, 0, rng);
+        let (two, _) = Tree::pick_random(&mut other.root, 0, rng);
+        std::mem::swap(one, two);
+    }
 
-                fn saturating_add(self, other: Self) -> Self {
-                    <$t>::saturating_add(self, other)
-                }
+    fn pick_random<'a>(
+        node: &'a mut Node<V>,
+        depth: usize,
+        rng: &mut impl Rng,
+    ) -> (&'a mut Node<V>, usize) {
+        if !node.has_children() {
+            return (node, depth);
+        }
+        let children = node.children_mut().unwrap();
+        let chosen = &mut children[rng.random_range(0..children.len())];
+        if rng.random_bool(0.5) {
+            // pick this one
+            (chosen, depth)
+        } else {
+            // go deeper
+            Self::pick_random(chosen, depth + 1, rng)
+        }
+    }
 
-                fn saturating_sub(self, other: Self) -> Self {
-                    <$t>::saturating_sub(self, other)
-                }
+    pub fn eval(&self, ctx: &V::Context) -> V::Value {
+        self.root.eval(ctx)
+    }
 
-                fn saturating_mul(self, other: Self) -> Self {
-                    <$t>::saturating_mul(self, other)
-                }
-
-                fn saturating_div(self, other:Self) -> Self {
-                    (Saturating(self) / Saturating(other)).0
-                }
-
-                fn saturating_neg(self) -> Self {
-                    (-Saturating(self)).0
-                }
-
-                fn double(self) -> Self {
-                    self * 2 as $t
-                }
-
-                fn is_zero(self) -> bool {
-                    self == Self::ZERO
-                }
-
-                // not needed for ints
-                fn handle_infinity(val: Self) -> Self { val }
+    fn depth(&self) -> usize {
+        let mut depth = 0;
+        let mut children = self.root.children().collect::<Vec<_>>();
+        loop {
+            if children.is_empty() {
+                return depth;
             }
-        )+
-    };
+            children = children.iter().flat_map(|c| c.children()).collect();
+            depth += 1;
+        }
+    }
+
+    pub fn to_rust(&self) -> String {
+        format!("let result = {};", self.root.to_rust())
+    }
+
+    pub fn simplify(&mut self) {
+        self.root.simplify();
+    }
 }
 
 #[derive(Debug, EnumDiscriminants, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -443,278 +607,118 @@ impl<V: Variable> Node<V> {
     }
 }
 
-#[derive(Debug, Clone, Educe, Serialize, Deserialize)]
-#[educe(Default)]
-#[serde(bound = "V: Serialize + DeserializeOwned, V::Value: Serialize + DeserializeOwned")]
-pub struct Tree<V: Variable> {
-    #[educe(Default = Node::Const(V::Value::ZERO))]
-    root: Node<V>,
-}
+impl_value_for_floats!(f32, f64);
+impl_value_for_signed_ints!(i8, i16, i32, i64, i128, isize);
 
-impl<V: Variable> Tree<V> {
-    fn new_random(
-        max_depth: usize,
-        generator: &impl RandomNodeGenerator<V>,
-        rng: &mut impl Rng,
-    ) -> Self {
-        Self {
-            root: Node::<V>::grow(generator, rng, 0, max_depth),
-        }
-    }
+#[doc(hidden)]
+#[macro_export]
+macro_rules! impl_value_for_floats {
+    ($($t:ty),+ $(,)?) => {
+        $(
+            impl Value for $t {
+                const MAX:Self = Self::MAX;
+                const MIN:Self = Self::MIN;
 
-    fn mutate(
-        &mut self,
-        max_depth: usize,
-        generator: &impl RandomNodeGenerator<V>,
-        rng: &mut impl Rng,
-    ) {
-        let (node, depth) = Self::pick_random(&mut self.root, 0, rng);
-        *node = Node::<V>::grow(generator, rng, 0, max_depth - depth);
-    }
+                fn min(self, other:Self) -> Self {
+                    self.min(other)
+                }
 
-    fn crossover(&mut self, other: &mut Self, rng: &mut impl Rng) {
-        let (one, _) = Tree::pick_random(&mut self.root, 0, rng);
-        let (two, _) = Tree::pick_random(&mut other.root, 0, rng);
-        std::mem::swap(one, two);
-    }
+                fn max(self, other: Self) -> Self {
+                    Float::max(self, other)
+                }
 
-    fn pick_random<'a>(
-        node: &'a mut Node<V>,
-        depth: usize,
-        rng: &mut impl Rng,
-    ) -> (&'a mut Node<V>, usize) {
-        if !node.has_children() {
-            return (node, depth);
-        }
-        let children = node.children_mut().unwrap();
-        let chosen = &mut children[rng.random_range(0..children.len())];
-        if rng.random_bool(0.5) {
-            // pick this one
-            (chosen, depth)
-        } else {
-            // go deeper
-            Self::pick_random(chosen, depth + 1, rng)
-        }
-    }
+                fn saturating_add(self, other: Self) -> Self {
+                    Self::handle_infinity(self + other)
+                }
 
-    pub fn eval(&self, ctx: &V::Context) -> V::Value {
-        self.root.eval(ctx)
-    }
+                fn saturating_sub(self, other: Self) -> Self {
+                    Self::handle_infinity(self - other)
+                }
 
-    fn depth(&self) -> usize {
-        let mut depth = 0;
-        let mut children = self.root.children().collect::<Vec<_>>();
-        loop {
-            if children.is_empty() {
-                return depth;
+                fn saturating_mul(self, other: Self) -> Self {
+                    Self::handle_infinity(self * other)
+                }
+
+                fn saturating_div(self, other: Self) -> Self {
+                    Self::handle_infinity(self / other)
+                }
+
+                fn saturating_neg(self) -> Self {
+                    Self::handle_infinity(-self)
+                }
+
+                fn double(self) -> Self {
+                    Self::handle_infinity(self * 2.0 as $t)
+                }
+
+                fn is_zero(self) -> bool {
+                    self.abs() < Self::EPSILON
+                }
+
+                fn handle_infinity(val: Self) -> Self {
+                    if val == <$t>::INFINITY {
+                        Self::MAX
+                    } else if val == <$t>::NEG_INFINITY {
+                        Self::MIN
+                    } else {
+                        val
+                    }
+                }
             }
-            children = children.iter().flat_map(|c| c.children()).collect();
-            depth += 1;
-        }
-    }
-
-    pub fn to_rust(&self) -> String {
-        format!("let result = {};", self.root.to_rust())
-    }
-
-    pub fn simplify(&mut self) {
-        self.root.simplify();
-    }
+        )+
+    };
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Debug)]
-pub enum NodeType<V: Variable> {
-    If4,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Neg,
-    Min,
-    Max,
-    Const(V::Value),
-    Var(V),
-}
+#[doc(hidden)]
+#[macro_export]
+macro_rules! impl_value_for_signed_ints {
+    ($($t:ty),+ $(,)?) => {
+        $(
+            impl Value for $t {
+                const MAX:Self = Self::MAX;
+                const MIN:Self = Self::MIN;
 
-pub trait RandomNodeGenerator<V: Variable> {
-    fn generate(&self, rng: &mut impl Rng) -> NodeType<V>;
-    fn generate_no_children(&self, rng: &mut impl Rng) -> NodeType<V>;
-}
+                fn min(self, other:Self) -> Self {
+                    Ord::min(self, other)
+                }
 
-#[derive(Debug, Clone)]
-pub struct WeightedNodeGenerator<const L: usize, const N: usize, V: Variable> {
-    all: [(NodeType<V>, u8); L],
-    leafs: [(NodeType<V>, u8); N],
-}
+                fn max(self, other: Self) -> Self {
+                    Ord::max(self, other)
+                }
 
-impl<const L: usize, const N: usize, V: Variable> WeightedNodeGenerator<L, N, V> {
-    /// Creates a new [`WeightedNodeGenerator`] with the specified weights.
-    ///
-    /// # Panics
-    /// When `leafs` contains a [`NodeType`] that can have children.
-    pub fn new(all: [(NodeType<V>, u8); L], leafs: [(NodeType<V>, u8); N]) -> Self {
-        for (n, _) in leafs {
-            assert!(matches!(n, NodeType::Const(_) | NodeType::Var(_)));
-        }
-        Self { all, leafs }
-    }
-}
+                fn saturating_add(self, other: Self) -> Self {
+                    <$t>::saturating_add(self, other)
+                }
 
-impl<const L: usize, const N: usize, V: Variable> RandomNodeGenerator<V>
-    for WeightedNodeGenerator<L, N, V>
-{
-    fn generate(&self, rng: &mut impl Rng) -> NodeType<V> {
-        self.all[rng.random_range(0..L)].0
-    }
+                fn saturating_sub(self, other: Self) -> Self {
+                    <$t>::saturating_sub(self, other)
+                }
 
-    fn generate_no_children(&self, rng: &mut impl Rng) -> NodeType<V> {
-        self.leafs[rng.random_range(0..N)].0
-    }
-}
+                fn saturating_mul(self, other: Self) -> Self {
+                    <$t>::saturating_mul(self, other)
+                }
 
-#[derive(Debug, Clone)]
-pub struct Evolver<V: Variable, G> {
-    population: NEVec<Tree<V>>,
-    max_tree_depth: usize,
-    generator: G,
-    rng: Random,
-}
+                fn saturating_div(self, other:Self) -> Self {
+                    (Saturating(self) / Saturating(other)).0
+                }
 
-impl<V: Variable, G: RandomNodeGenerator<V>> Evolver<V, G> {
-    #[expect(clippy::missing_panics_doc, reason = "false positive")]
-    pub fn new(pop_size: NonZeroUsize, max_tree_depth: usize, generator: G, seed: u64) -> Self {
-        let mut rng = Random::seed_from_u64(seed);
-        Self {
-            population: std::iter::repeat_with(|| {
-                Tree::new_random(max_tree_depth, &generator, &mut rng)
-            })
-            .try_into_nonempty_iter()
-            .unwrap() // TODO this can be avoided with an update to nonempty-collections
-            .take(pop_size)
-            .collect(),
-            max_tree_depth,
-            generator,
-            rng,
-        }
-    }
+                fn saturating_neg(self) -> Self {
+                    (-Saturating(self)).0
+                }
 
-    #[expect(clippy::missing_panics_doc, reason = "false positive")]
-    pub fn evolve(
-        &mut self,
-        evaluator: &impl Evaluator<V>,
-        generations: usize,
-    ) -> (Tree<V>, V::Value) {
-        let mut generation_best = (Tree::default(), V::Value::MAX);
+                fn double(self) -> Self {
+                    self * 2 as $t
+                }
 
-        let last_gen = generations - 1;
-        for generation in 0..generations {
-            println!("{generation}");
+                fn is_zero(self) -> bool {
+                    self == Self::ZERO
+                }
 
-            let pop2 = self.population.iter().enumerate().collect::<Vec<_>>();
-
-            let fitness = pop2
-                .par_iter()
-                .enumerate()
-                .map(|(i, (i2, tree))| {
-                    assert_eq!(i, *i2);
-                    (
-                        i,
-                        evaluator.evaluate(generation, generation == last_gen, tree),
-                    )
-                })
-                .collect::<Vec<_>>(); // TODO with rayon support for nonempty-collections we could collect into a NEVec here
-            debug_assert!(fitness.is_sorted_by_key(|x| x.0));
-
-            let sum = fitness
-                .iter()
-                .map(|(_, f)| *f)
-                .sum::<V::Value>()
-                .to_f64()
-                .unwrap();
-            println!(
-                "fitness min {} avg {}",
-                fitness
-                    .iter()
-                    .map(|(_, f)| f)
-                    .min_by(|l, r| l
-                        .partial_cmp(r)
-                        .unwrap_or_else(|| panic!("{l:?} {r:?} comparison failed")))
-                    .unwrap(),
-                sum / fitness.len() as f64
-            );
-
-            // println!("{fitness:?}");
-
-            let best_index = fitness
-                .iter()
-                .min_by(|(_, f1), (_, f2)| f1.partial_cmp(f2).unwrap())
-                .map(|(i, _)| i)
-                .copied()
-                .unwrap();
-
-            // elitism 1
-            let mut next_generation = NEVec::with_capacity(
-                self.population.capacity(),
-                self.population[best_index].clone(),
-            );
-
-            generation_best = (self.population[best_index].clone(), fitness[best_index].1);
-
-            // if fitness[best_index] < all_time_best.1 {
-            //     println!(" >>>> found better {}", fitness[best_index]);
-            //     all_time_best = (self.population[best_index].clone(),
-            // fitness[best_index]);
-
-            //     if fitness[best_index].is_zero() {
-            //         println!("Found optimum");
-            //         return all_time_best;
-            //     }
-            // }
-
-            // crossover 90%
-            let crossover_target = (0.9 * (self.population.len().get() as f64)) as usize;
-            while next_generation.len().get() < crossover_target {
-                let mut p1 =
-                    self.population[Self::select_by_tournament(&fitness, &mut self.rng)].clone();
-                let mut p2 =
-                    self.population[Self::select_by_tournament(&fitness, &mut self.rng)].clone();
-                p1.crossover(&mut p2, &mut self.rng);
-
-                next_generation.extend(
-                    [p1, p2]
-                        .into_iter()
-                        .filter(|p| p.depth() < self.max_tree_depth),
-                );
+                // not needed for ints
+                fn handle_infinity(val: Self) -> Self { val }
             }
-
-            // mutation 10% (rest)
-            while next_generation.len() < self.population.len() {
-                let mut mutated =
-                    self.population[Self::select_by_tournament(&fitness, &mut self.rng)].clone();
-                mutated.mutate(self.max_tree_depth, &self.generator, &mut self.rng);
-                next_generation.push(mutated);
-            }
-
-            self.population = next_generation;
-        }
-        generation_best
-    }
-
-    fn select_by_tournament(fitness: &[(usize, V::Value)], rng: &mut impl Rng) -> usize {
-        index::sample(rng, fitness.len(), 7)
-            .iter()
-            .min_by(|&l, &r| fitness[l].partial_cmp(&fitness[r]).unwrap())
-            .unwrap()
-    }
-}
-
-pub trait Evaluator<V: Variable>: Send + Sync {
-    fn evaluate(&self, generation: usize, last: bool, individual: &Tree<V>) -> V::Value;
-}
-
-fn _test() {
-    let x: f64 = 7.0;
-    let _result = x + 1.0 * x + f64::max(x + 2.0, 2.0) + 2.0;
+        )+
+    };
 }
 
 #[cfg(test)]
