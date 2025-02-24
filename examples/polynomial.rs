@@ -36,14 +36,6 @@ pub fn main() {
     let best = pop.evolve(&Polynomial, 100);
 
     println!("{best:?}");
-
-    println!("{}", best.0.to_rust());
-
-    let mut simple = best.0.clone();
-    simple.simplify();
-    println!("----");
-    println!("{simple:?}");
-    println!("{}", simple.to_rust());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
