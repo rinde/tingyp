@@ -430,6 +430,11 @@ impl<V: Variable> Tree<V> {
     pub fn simplify(&mut self) {
         self.root.simplify();
     }
+
+    pub fn to_dot(&self) -> String {
+        let mut id = 0;
+        format!("digraph {{\n{}}}", self.root.to_dot(&mut id))
+    }
 }
 
 #[derive(Debug, EnumDiscriminants, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -575,6 +580,36 @@ impl<V: Variable> Node<V> {
             Const(value) => format!("{value:.2}"),
             Var(v) => v.name().to_string(),
         }
+    }
+
+    fn to_dot(&self, id: &mut usize) -> String {
+        use Node::*;
+        let current_id = *id;
+        let mut s = String::new();
+
+        let mut children_to_dot = |name: &str, children: &[Box<Node<V>>]| {
+            s.push_str(format!("n{current_id}[label=\"{name}\"]\n").as_str());
+            for c in children {
+                *id += 1;
+                let child_id = *id;
+                s.push_str(format!("n{current_id} -> n{child_id}\n").as_str());
+                s.push_str(c.to_dot(id).as_str());
+            }
+        };
+
+        match self {
+            If4(children) => children_to_dot("if4", children),
+            Add(children) => children_to_dot("add", children),
+            Sub(children) => children_to_dot("sub", children),
+            Mul(children) => children_to_dot("mul", children),
+            Div(children) => children_to_dot("div", children),
+            Neg(children) => children_to_dot("neg", children),
+            Min(children) => children_to_dot("min", children),
+            Max(children) => children_to_dot("max", children),
+            Const(value) => s.push_str(format!("n{current_id}[label=\"{value}\"]\n").as_str()),
+            Var(v) => s.push_str(format!("n{current_id}[label=\"{}\"]\n", v.name()).as_str()),
+        }
+        s
     }
 
     // TODO test that the simplified version is identical to non-simplified
